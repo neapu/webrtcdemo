@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8" />
+    <title>WebRTC 一对一视频通话</title>
+    <style>
+        video {
+            max-width: 100%;
+            height: auto;
+        }
+    </style>
+</head>
+
+<body>
+    <video id="localVideo" autoplay muted></video>
+    <video id="remoteVideo" autoplay></video>
+    <br />
+    <button id="callButton">呼叫</button>
+    <button id="hangupButton" disabled>挂断</button>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+
+        const localVideo = document.querySelector("#localVideo");
+        const remoteVideo = document.querySelector("#remoteVideo");
+        let localStream, remoteStream;
+        let peerConnection;
+
+        async function start() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                localVideo.srcObject = localStream;
+            } catch (error) {
+                console.error(`获取本地流失败：${error}`);
+            }
+        }
+
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection({
+                iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+                sdpSemantics: "plan-b"
+            });
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    console.log(`发送候选者：${event.candidate}`);
+                    socket.emit("candidate", event.candidate);
+                }
+            };
+
+            peerConnection.ontrack = (event) => {
+                console.log(`接收远端轨道：${event.track.kind}`);
+                remoteStream = new MediaStream();
+                remoteStream.addTrack(event.track);
+                remoteVideo.srcObject = remoteStream;
+            };
+
+            localStream.getTracks().forEach((track) => {
+                console.log(`添加本地轨道：${track.kind}`);
+                peerConnection.addTrack(track, localStream);
+            });
+        }
+
+        async function createOffer() {
+            try {
+                const offer = await peerConnection.createOffer();
+                console.log(`创建本地 Offer：${offer.sdp}`);
+                await peerConnection.setLocalDescription(offer);
+                console.log(`发送本地 Offer：${offer.sdp}`);
+                socket.emit("offer", offer);
+            } catch (error) {
+                console.error(`创建本地 Offer 失败：${error}`);
+            }
+        }
+
+        async function createAnswer() {
+            try {
+                const answer = await peerConnection.createAnswer();
+                console.log(`创建本地 Answer：${answer.sdp}`);
+                await peerConnection.setLocalDescription(answer);
+                console.log(`发送本地 Answer：${answer.sdp}`);
+                socket.emit("answer", answer);
+            } catch (error) {
+                console.error(`创建本地 Answer 失败：${error}`);
+            }
+        }
+
+        function handleRemoteSdp(message) {
+            const sdp = message.sdp;
+            console.log(`接收远端 SDP：${sdp}`);
+            const description = new RTCSessionDescription({ type: message.type, sdp });
+            peerConnection.setRemoteDescription(description).then(() => {
+                console.log(`设置远端 SDP 成功：${message.type}`);
+                if (message.type === "offer") {
+                    createAnswer
+                        .then(() => {
+                            console.log("创建本地 Answer 成功");
+                        })
+                        .catch((error) => {
+                            console.error(`创建本地 Answer 失败：${error}`);
+                        });
+                }
+            });
+        }
+
+        function handleCandidate(message) {
+            const candidate = new RTCIceCandidate(message);
+            console.log(`接收远端 ICE candidate：${candidate}`);
+            peerConnection.addIceCandidate(candidate).then(() => {
+                console.log("添加远端 ICE candidate 成功");
+            });
+        }
+
+        function handleHangup() {
+            console.log("收到挂断事件");
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            localStream.getTracks().forEach((track) => track.stop());
+            localVideo.srcObject = null;
+            remoteVideo.srcObject = null;
+            document.querySelector("#callButton").disabled = false;
+            document.querySelector("#hangupButton").disabled = true;
+        }
+
+        socket.on("offer", (offer) => {
+            console.log(`接收到远端 Offer：${offer.sdp}`);
+            createPeerConnection();
+            peerConnection
+                .setRemoteDescription(new RTCSessionDescription(offer))
+                .then(() => {
+                    console.log("设置远端 SDP 成功");
+                })
+                .then(createAnswer)
+                .catch((error) => {
+                    console.error(`设置远端 SDP 失败：${error}`);
+                });
+        });
+
+        socket.on("answer", (answer) => {
+            console.log(`接收到远端 Answer：${answer.sdp}`);
+            const description = new RTCSessionDescription(answer);
+            peerConnection
+                .setRemoteDescription(description)
+                .then(() => {
+                    console.log("设置远端 SDP 成功");
+                })
+                .catch((error) => {
+                    console.error(`设置远端 SDP 失败：${error}`);
+                });
+        });
+
+        socket.on("candidate", handleCandidate);
+
+        socket.on("hangup", handleHangup);
+
+        document.querySelector("#callButton").addEventListener("click", () => {
+            document.querySelector("#callButton").disabled = true;
+            document.querySelector("#hangupButton").disabled = false;
+            createPeerConnection();
+            createOffer();
+        });
+
+        document.querySelector("#hangupButton").addEventListener("click", () => {
+            document.querySelector("#hangupButton").disabled = true;
+            socket.emit("hangup");
+            handleHangup();
+        });
+
+        start();
+    </script>
+</body>
+
+</html>
